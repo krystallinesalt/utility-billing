@@ -415,3 +415,43 @@ class TestVacatedContract(MultiGodownCase):
 		self.assertFalse(contract_released(contract.name, "2026-06-30"))
 		self.assertTrue(contract_released(contract.name, "2026-07-31"))
 		self.assertTrue(contract_released(contract.name))
+
+
+class TestEndingALeaseOnTheContract(MultiGodownCase):
+	"""Unticking a property on the Contract is Lease Status Invalid on the request."""
+
+	def setUp(self):
+		super().setUp()
+		self.request = fx.make_request([(A, A_START, A_END), (B, B_START, B_END)], A_START, B_END)
+		self.contract = fx.make_contract(self.request.name)
+
+	def release_b(self, vacated_on=None):
+		contract = frappe.get_doc("Contract", self.contract.name)
+		row = next(r for r in contract.properties if r.utility_property == B)
+		row.is_active = 0
+		row.vacated_on = vacated_on
+		contract.save(ignore_permissions=True)
+		return contract
+
+	def test_the_vacated_on_date_is_required(self):
+		with self.assertRaisesRegex(frappe.ValidationError, "vacated"):
+			self.release_b()
+
+	def test_the_request_row_follows(self):
+		contract = self.release_b("2026-06-15")
+
+		request = frappe.get_doc("Utility Service Request", self.request.name)
+		row = next(r for r in request.requested_properties if r.utility_property == B)
+		self.assertEqual((row.lease_status, str(row.vacated_on), row.is_active), ("Invalid", "2026-06-15", 0))
+		contract_row = next(r for r in contract.properties if r.utility_property == B)
+		self.assertEqual(contract_row.lease_status, "Invalid")
+		other = next(r for r in request.requested_properties if r.utility_property == A)
+		self.assertEqual(other.is_active, 1)
+		self.assertEqual(fx.property_status(B), "Available")
+
+	def test_lease_status_cannot_be_edited_on_the_contract_otherwise(self):
+		contract = frappe.get_doc("Contract", self.contract.name)
+		contract.properties[0].lease_status = "Valid"
+
+		with self.assertRaisesRegex(frappe.ValidationError, "cannot be changed"):
+			contract.save(ignore_permissions=True)

@@ -10,6 +10,8 @@ const LOCKED_ROW_FIELDS = [
 	"contract_length_months",
 	"adjustment_rule",
 	"insurance",
+	"lease_status",
+	"vacated_on",
 ];
 
 frappe.ui.form.on("Contract", {
@@ -29,6 +31,11 @@ frappe.ui.form.on("Contract Utility Property Item", {
 		if (frm.doc.docstatus === 1 && !row.__islocal && row.is_active) {
 			frappe.msgprint("You cannot activate a property once the contract is submitted.");
 			frappe.model.set_value(cdt, cdn, "is_active", 0);
+			return;
+		}
+
+		if (frm.doc.docstatus === 1 && !row.is_active && frm.doc.utility_service_request) {
+			ask_vacated_on(frm, row);
 		}
 	},
 
@@ -49,6 +56,50 @@ frappe.ui.form.on("Contract Utility Property Item", {
 		}
 	},
 });
+
+// Ending a lease early on the Contract: the tenant's leaving date makes the row
+// Lease Status Invalid, here and (on save) on its Utility Service Request. The
+// month vacated in is still billed; the invoice may bill the occupied days only.
+function ask_vacated_on(frm, row) {
+	const dialog = new frappe.ui.Dialog({
+		title: __("End lease of {0}", [row.utility_property]),
+		fields: [
+			{
+				fieldname: "vacated_on",
+				fieldtype: "Date",
+				label: __("Vacated On"),
+				reqd: 1,
+				default: frappe.datetime.get_today(),
+				description: __(
+					"The month of this date is billed in full. To bill only the days occupied, tick Bill Occupied Days Only on that invoice and attach the signed approval.",
+				),
+			},
+		],
+		primary_action_label: __("End Lease"),
+		primary_action(values) {
+			if (row.start_date && values.vacated_on < row.start_date) {
+				frappe.msgprint(__("The tenant cannot vacate before the lease starts on {0}.", [frappe.datetime.str_to_user(row.start_date)]));
+				return;
+			}
+			frappe.model.set_value(row.doctype, row.name, "lease_status", "Invalid");
+			frappe.model.set_value(row.doctype, row.name, "vacated_on", values.vacated_on);
+			dialog.hide();
+			frappe.show_alert({
+				message: __("Save the Contract to end the lease. Its Utility Service Request is updated too."),
+				indicator: "orange",
+			});
+		},
+	});
+	// Closing without a date keeps the lease running
+	dialog.onhide = () => {
+		if (!row.vacated_on) {
+			// Set directly: through set_value the Is Active handler would refuse reactivating
+			row.is_active = 1;
+			frm.refresh_field("properties");
+		}
+	};
+	dialog.show();
+}
 
 // The rows and the request link come from the Utility Service Request through
 // create_contract, and so do the dates of a Contract linked to one. Only this

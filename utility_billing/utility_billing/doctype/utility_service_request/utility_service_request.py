@@ -59,7 +59,7 @@ class UtilityServiceRequest(Document):
 		before = self.get_doc_before_save()
 		if before:
 			adjust_prices_to_window(self, before)
-			sync_contracts(self, before)
+			sync_contracts(self, before, exclude=self.flags.released_from_contract)
 
 	def before_submit(self):
 		validate_no_overlapping_leases(self)

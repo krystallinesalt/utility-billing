@@ -101,7 +101,7 @@ def refuse_unconfirmed_contract_change(doc, before) -> None:
 	)
 
 
-def sync_contracts(doc, before) -> None:
+def sync_contracts(doc, before, exclude: str | None = None) -> None:
 	"""Copy a request's dates and property rows to its Contracts.
 
 	Runs from the request's on_update_after_submit. Rows are matched by
@@ -118,6 +118,9 @@ def sync_contracts(doc, before) -> None:
 	not checked on a draft.
 	"""
 	for name in contracts_to_update(doc, before):
+		if name == exclude:
+			# The Contract the change came from (see contract.release_on_request)
+			continue
 		contract = frappe.get_doc("Contract", name)
 		contract.start_date = _date(doc.start_date)
 		contract.end_date = _date(doc.end_date)

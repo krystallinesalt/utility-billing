@@ -21,7 +21,11 @@ LOCKED_ROW_FIELDS = (
     "contract_length_months",
     "adjustment_rule",
     "insurance",
+    "lease_status",
+    "vacated_on",
 )
+# Released on the Contract only together with Is Active, see check_release
+RELEASE_FIELDS = ("lease_status", "vacated_on")
 # Copied from the Utility Service Request too, so locked while the Contract is linked to one
 LOCKED_HEADER_FIELDS = ("start_date", "end_date")
 DATE_FIELDS = {"start_date", "end_date"}
@@ -121,7 +125,11 @@ def check_rows_unchanged(doc, saved) -> None:
                 ).format(row.idx)
             )
 
+        released = check_release(doc, row, saved_row)
+
         for fieldname in LOCKED_ROW_FIELDS:
+            if released and fieldname in RELEASE_FIELDS:
+                continue
             if normalise(fieldname, row.get(fieldname)) != normalise(fieldname, saved_row.get(fieldname)):
                 frappe.throw(
                     _(
@@ -146,6 +154,85 @@ def check_rows_unchanged(doc, saved) -> None:
                 ", ".join(frappe.bold(name) for name in removed)
             )
         )
+
+
+def check_release(doc, row, saved_row) -> bool:
+    """Require the tenant's leaving date when a property is released on the Contract.
+
+    Unticking Is Active on a submitted Contract linked to a request ends that
+    lease early: it is the same as Lease Status Invalid on the request, so the
+    row must carry the Vacated On date, and the request follows on save (see
+    ``release_on_request``). The month vacated in is still billed.
+
+    Returns:
+        Whether this save releases the row, so its Lease Status and Vacated On
+        may change.
+
+    Raises:
+        frappe.ValidationError: When a released row has no Vacated On date, or
+            one before its start.
+    """
+    releasing = (
+        saved_row.get("docstatus") == 1
+        and cint(saved_row.get("is_active"))
+        and not cint(row.get("is_active"))
+        and doc.get("utility_service_request")
+    )
+    if not releasing:
+        return False
+
+    row.lease_status = "Invalid"
+    if not row.get("vacated_on"):
+        frappe.throw(
+            _("Row #{0}: enter the date the tenant vacated {1} to end its lease.").format(
+                row.idx, frappe.bold(row.utility_property)
+            ),
+            title=_("Vacated On needed"),
+        )
+    if row.start_date and getdate(row.vacated_on) < getdate(row.start_date):
+        frappe.throw(
+            _("Row #{0}: {1} cannot be vacated on {2}, before its lease starts on {3}.").format(
+                row.idx, frappe.bold(row.utility_property), row.vacated_on, row.start_date
+            )
+        )
+
+    return True
+
+
+def release_on_request(doc: Document) -> None:
+    """Mark properties released on the Contract as vacated on its request.
+
+    The request is the source of each lease: its row becomes Lease Status
+    Invalid with the same Vacated On date and is released, so billing, the
+    property's status and every other Contract of the request agree. This
+    Contract is already saved, so it is left out of the request's sync.
+    """
+    if doc.flags.from_service_request or not doc.get("utility_service_request"):
+        return
+
+    released = {
+        entry.utility_property: entry.vacated_on
+        for entry in doc.properties
+        if entry.utility_property and entry.has_value_changed("is_active") and not cint(entry.is_active)
+    }
+    if not released:
+        return
+
+    from utility_billing.utility_billing.utils.contract_sync import CONSENT_KEY
+
+    request = frappe.get_doc("Utility Service Request", doc.utility_service_request)
+    changed = False
+    for row in request.requested_properties:
+        if row.utility_property in released and cint(row.is_active):
+            row.lease_status = "Invalid"
+            row.vacated_on = released[row.utility_property]
+            row.is_active = 0
+            changed = True
+
+    if changed:
+        request.flags.released_from_contract = doc.name
+        request.set(CONSENT_KEY, 1)
+        request.save(ignore_permissions=True)
 
 
 def normalise(fieldname: str, value):
@@ -192,6 +279,7 @@ def on_cancel(doc: Document, method: str) -> None:
 
 @frappe.whitelist()
 def on_update_after_submit(doc: Document, method: str) -> None:
+    release_on_request(doc)
     status_changed = doc.has_value_changed("status")
     current_status = doc.status
 
