@@ -14,6 +14,7 @@ from frappe.query_builder.functions import IfNull
 from frappe.utils import cint, flt
 
 from utility_billing.utility_billing.utils import request_prices
+from utility_billing.utility_billing.utils.lease_validity import is_holding_over, is_vacated
 from utility_billing.utility_billing.utils.price_list import resolve_price_list
 
 
@@ -99,7 +100,7 @@ def get_request_price(context: frappe._dict, item_code: str, service_request: st
 	property_name = next(
 		(name for name, item in request_prices.property_service_items(request).items() if item == item_code),
 		None,
-	)
+	) or vacated_property_of_item(request, item_code)
 	start, end = request_prices.lease_window(request, property_name) if property_name else (None, None)
 	if not (start and request.customer):
 		return None
@@ -123,6 +124,22 @@ def get_request_price(context: frappe._dict, item_code: str, service_request: st
 		query = query.where(ip.valid_from <= end)
 	rows = query.run(as_dict=True)
 
+	if not rows and is_holding_over(property_row(request, property_name)):
+		# Held over past the last price: the last rent goes on applying
+		query = (
+			frappe.qb.from_(ip)
+			.select(ip.price_list_rate, ip.uom)
+			.where(ip.item_code == item_code)
+			.where(ip.price_list == context.price_list)
+			.where(ip.customer == request.customer)
+			.where(ip.valid_from >= start)
+			.where(IfNull(ip.uom, "").isin(["", context.uom]))
+			.where(IfNull(ip.valid_from, "2000-01-01") <= date)
+			.orderby(ip.valid_from, order=Order.desc)
+			.limit(1)
+		)
+		rows = query.run(as_dict=True)
+
 	if not rows:
 		return None
 
@@ -131,3 +148,35 @@ def get_request_price(context: frappe._dict, item_code: str, service_request: st
 		return price.price_list_rate
 
 	return flt(price.price_list_rate * flt(context.conversion_factor))
+
+
+def property_row(request, property_name: str | None):
+	"""Return the active, else the vacated, Requested Properties row of a property."""
+	rows = [row for row in request.get("requested_properties") or [] if row.utility_property == property_name]
+	return next((row for row in rows if cint(row.get("is_active"))), None) or next(
+		(row for row in rows if is_vacated(row)), None
+	)
+
+
+def vacated_property_of_item(request, item_code: str) -> str | None:
+	"""Return the vacated property of a request whose service item is ``item_code``.
+
+	A vacated property is no longer active, yet the month it was left in is
+	still billed at its own rent.
+	"""
+	vacated = [row.utility_property for row in request.get("requested_properties") or [] if is_vacated(row)]
+	if not vacated:
+		return None
+
+	return next(
+		iter(
+			frappe.get_all(
+				"Utility Property",
+				filters={"name": ("in", vacated), "service_item": item_code},
+				pluck="name",
+				limit=1,
+			)
+		),
+		None,
+	)
+

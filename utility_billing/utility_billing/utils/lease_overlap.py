@@ -12,6 +12,8 @@ import frappe
 from frappe import _
 from frappe.utils import getdate
 
+from utility_billing.utility_billing.utils.lease_validity import row_lease_end
+
 USR_DOCTYPE = "Utility Service Request"
 ROW_DOCTYPE = "Contract Utility Property Item"
 
@@ -34,7 +36,7 @@ def validate_no_overlapping_leases(doc) -> None:
 			utility_property=row.utility_property,
 			idx=row.idx,
 			start=row.start_date or doc.start_date,
-			end=row.end_date or doc.end_date,
+			end=row_lease_end(row, doc.end_date),
 		)
 		for row in doc.get("requested_properties") or []
 		if row.utility_property and row.get("is_active") != 0
@@ -94,6 +96,7 @@ def get_submitted_leases(utility_property: str, exclude: str | None = None) -> l
 			request.customer,
 			row.start_date,
 			row.end_date,
+			row.lease_status,
 			request.start_date.as_("request_start"),
 			request.end_date.as_("request_end"),
 		)
@@ -109,7 +112,7 @@ def get_submitted_leases(utility_property: str, exclude: str | None = None) -> l
 			service_request=entry.service_request,
 			customer=entry.customer,
 			start=entry.start_date or entry.request_start,
-			end=entry.end_date or entry.request_end,
+			end=row_lease_end(entry, entry.request_end),
 		)
 		for entry in rows
 	]

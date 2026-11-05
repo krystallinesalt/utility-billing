@@ -271,11 +271,13 @@ def _update_price(row: dict, allowed_items: set[str], service_request, result: d
     valid_from = getdate(row.get("valid_from"))
     valid_upto = getdate(row.get("valid_upto"))
     rate = flt(row.get("price_list_rate"))
+    remarks = _remarks(row)
 
     if (
         getdate(price.valid_from) == valid_from
         and getdate(price.valid_upto) == valid_upto
         and flt(price.price_list_rate) == rate
+        and (frappe.db.get_value("Item Price", price.name, "period_remarks") or "") == remarks
     ):
         result["unchanged"] += 1
         return
@@ -283,7 +285,12 @@ def _update_price(row: dict, allowed_items: set[str], service_request, result: d
     frappe.db.set_value(
         "Item Price",
         price.name,
-        {"price_list_rate": rate, "valid_from": valid_from, "valid_upto": valid_upto},
+        {
+            "price_list_rate": rate,
+            "valid_from": valid_from,
+            "valid_upto": valid_upto,
+            "period_remarks": remarks or None,
+        },
         update_modified=False,
     )
     result["updated"] += 1
@@ -310,5 +317,12 @@ def _create_price(
         result["skipped"] += 1
         return
 
-    item_price_utils.insert_item_price(options, line, period)
+    name = item_price_utils.insert_item_price(options, line, period)
+    if _remarks(row):
+        frappe.db.set_value("Item Price", name, "period_remarks", _remarks(row), update_modified=False)
     result["created"] += 1
+
+
+def _remarks(row: dict) -> str:
+    """Return a period's remarks, trimmed to the 350 characters the field holds."""
+    return (row.get("period_remarks") or "").strip()[:350]

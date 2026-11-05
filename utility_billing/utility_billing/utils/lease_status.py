@@ -143,7 +143,11 @@ def derive_lease_status(
 	rows = contract_rows or []
 	if rows and not any(
 		cint(row.get("is_active"))
-		and (not row.get("end_date") or getdate(row["end_date"]) >= getdate(reference_date or today()))
+		and (
+			row.get("lease_status") == "Valid"
+			or not row.get("end_date")
+			or getdate(row["end_date"]) >= getdate(reference_date or today())
+		)
 		for row in rows
 	):
 		return EXPIRED

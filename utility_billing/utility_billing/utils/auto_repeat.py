@@ -6,6 +6,13 @@ from frappe.query_builder import DocType
 from frappe.utils import add_days, cint, date_diff, getdate, today
 
 from utility_billing.utility_billing.utils.contract_status import contract_requirement_blocks
+from utility_billing.utility_billing.utils.item_rate import get_rate_for_date
+from utility_billing.utility_billing.utils.lease_validity import (
+	INVALID,
+	is_holding_over,
+	is_vacated,
+	same_month,
+)
 from utility_billing.utility_billing.utils.request_prices import is_item_price_approach, last_billed_day
 
 
@@ -254,6 +261,31 @@ def add_comment(doctype: str, name: str, content: str) -> None:
 		frappe.log_error(f"Error adding comment to {doctype} {name}: {frappe.get_traceback()}")
 
 
+def final_billing_day(request, row, billing_date):
+	"""Return the date a row's line bills on ``billing_date``, or ``None`` to skip it.
+
+	Normally the billing date itself. When the lease ends before it in the same
+	month (its last billed day, or the Vacated On date of a vacated row), the
+	line bills that last day, so the month is billed in full at the last rent.
+	A later month is past the lease and not billed. A held over lease (Lease
+	Status Valid) never ends.
+	"""
+	if is_holding_over(row):
+		return billing_date
+
+	if is_vacated(row):
+		last_day = getdate(row.vacated_on)
+	elif row.end_date and is_item_price_approach():
+		last_day = last_billed_day(request, row.utility_property, row.end_date)
+	else:
+		last_day = getdate(row.end_date) if row.end_date else None
+
+	if not last_day or billing_date <= last_day:
+		return billing_date
+
+	return last_day if same_month(last_day, billing_date) else None
+
+
 def set_property_on_invoice(invoice, row, source_item, company: str) -> str | None:
 	"""Mark an auto-billed invoice as the bill of one leased property.
 
@@ -294,8 +326,9 @@ def create_item_price_sales_invoices():
 			"parentfield": "requested_properties",
 			"enable_auto_billing": 1,
 			"rent_billing_approach": "Item Price",
-			"is_active": 1,
 		},
+		# Active rows, and vacated ones: the month a tenant left in is still billed
+		or_filters={"is_active": 1, "lease_status": INVALID},
 		fields=[
 			"name",
 			"parent",
@@ -303,6 +336,9 @@ def create_item_price_sales_invoices():
 			"item_code",
 			"start_date",
 			"end_date",
+			"is_active",
+			"lease_status",
+			"vacated_on",
 			"billing_date_type",
 			"billing_day_of_month",
 		],
@@ -316,7 +352,7 @@ def create_item_price_sales_invoices():
 			if row.start_date and billing_date < getdate(row.start_date):
 				continue
 
-			if row.end_date and billing_date > getdate(row.end_date):
+			if not cint(row.is_active) and not (is_vacated(row) and same_month(row.vacated_on, billing_date)):
 				continue
 
 			last_day = calendar.monthrange(billing_date.year, billing_date.month)[1]
@@ -341,19 +377,17 @@ def create_item_price_sales_invoices():
 			if request.docstatus != 1:
 				continue
 
-			# A lease end falling whole months after the start is the day after
-			# the last billed day, so nothing is billed on it.
-			if (
-				row.end_date
-				and is_item_price_approach()
-				and billing_date > last_billed_day(request, row.utility_property, row.end_date)
-			):
+			# The day the line bills: the billing day, or the lease's last day
+			# when the lease ends earlier in the same month, which is then billed
+			# in full at the last rent. A held over lease (Valid) has no end.
+			line_date = final_billing_day(request, row, billing_date)
+			if not line_date:
 				continue
 
 			# The drafts are inserted without validation, so Require Contract is
 			# checked here: no submitted Contract, none signed when signing is
-			# required, or every row released.
-			if contract_requirement_blocks(request.name):
+			# required, or every row released (the month a row was vacated in aside).
+			if contract_requirement_blocks(request.name, line_date):
 				continue
 
 			customer = request.get("customer") or (
@@ -494,6 +528,24 @@ def create_item_price_sales_invoices():
 						item.set(field, value)
 
 				item.qty = source_item.qty
+				if line_date != billing_date:
+					item.custom_posting_date = line_date
+				# The request's own price on the line's date, the last rent when held over
+				rate = get_rate_for_date(
+					item.item_code,
+					line_date,
+					customer=invoice.customer,
+					price_list=invoice.selling_price_list,
+					uom=item.uom,
+					qty=item.qty,
+					conversion_factor=item.conversion_factor or 1,
+					plc_conversion_rate=invoice.plc_conversion_rate or 1,
+					conversion_rate=invoice.conversion_rate or 1,
+					service_request=request.name,
+				)
+				if rate is not None:
+					item.price_list_rate = rate
+					item.rate = rate
 				# The item's defaults must not move the line off its property
 				item.utility_property = row.utility_property
 				item.cost_center = (

@@ -20,6 +20,7 @@ from utility_billing.utility_billing.utils.cost_center import (
 	resolve_primary_cost_center,
 )
 from utility_billing.utility_billing.utils.item_prices import delete_request_prices
+from utility_billing.utility_billing.utils.lease_validity import apply_lease_status
 from utility_billing.utility_billing.utils.lease_overlap import validate_no_overlapping_leases
 from utility_billing.utility_billing.utils.price_list import apply_default_price_list
 from utility_billing.utility_billing.utils.request_prices import adjust_prices_to_window, validate_lease_move
@@ -34,6 +35,7 @@ class UtilityServiceRequest(Document):
 		self.validate_items()
 		self.set_customer_if_needed()
 		apply_default_price_list(self)
+		apply_lease_status(self)
 		self.validate_child_items()
 		self.validate_contract_dates()
 		ensure_service_items_for_properties(self)
@@ -41,6 +43,7 @@ class UtilityServiceRequest(Document):
 
 	def before_update_after_submit(self):
 		# Re-run validation logic when updating after submission
+		apply_lease_status(self)
 		self.validate_child_items()
 		self.validate_contract_dates()
 		before = self.get_doc_before_save()

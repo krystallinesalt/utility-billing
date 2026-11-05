@@ -14,6 +14,7 @@ from frappe import _
 from frappe.utils import getdate
 
 from utility_billing.utility_billing.utils import item_price_summary, request_prices
+from utility_billing.utility_billing.utils.lease_validity import row_lease_end
 
 ITEM_PRICE_APPROACH = "Item Price"
 
@@ -89,7 +90,7 @@ def property_contract_period(service_request, property_name: str) -> tuple:
         if row.utility_property == property_name:
             return (
                 row.start_date or service_request.start_date,
-                row.end_date or service_request.end_date,
+                row_lease_end(row, service_request.end_date),
             )
 
     return service_request.start_date, service_request.end_date

@@ -4,7 +4,7 @@ from erpnext.controllers.accounts_controller import AccountsController
 from erpnext.controllers.taxes_and_totals import calculate_taxes_and_totals
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import flt, fmt_money, getdate
+from frappe.utils import cint, flt, fmt_money, getdate
 
 from ...utils.cost_center import (
 	default_cost_center,
@@ -23,6 +23,7 @@ from ...utils.deferred_posting import (
 )
 from ...utils.item_price_scope import is_item_price_approach
 from ...utils.item_rate import get_rate_for_date
+from ...utils.lease_validity import occupied_fraction, row_lease_end
 from ...utils.utility_item_classifier import (
 	MATCH_MULTIPLE,
 	PRIMARY,
@@ -78,6 +79,7 @@ def validate(doc: Document, method: str | None = None) -> None:
 	# After linking, so a request linked on this save already gives its lines their cost center.
 	fill_request_line_dimensions(doc)
 	align_invoice_property(doc)
+	check_occupied_days_approval(doc, governed)
 
 	contract = check_service_request_contract(doc)
 	if contract:
@@ -224,7 +226,13 @@ def check_service_request_contract(doc: Document) -> str | None:
 	contracts = frappe.get_all("Contract", filters=filters, pluck="name", order_by="creation desc")
 	if not is_item_price_approach():
 		contracts = contracts[:1]
-	held = [name for name in contracts if not (is_item_price_approach() and contract_released(name))]
+	billed_on = min(
+		(getdate(row.get(POSTING_DATE_FIELD) or doc.posting_date) for row in doc.get("items") or []),
+		default=getdate(doc.posting_date),
+	)
+	held = [
+		name for name in contracts if not (is_item_price_approach() and contract_released(name, billed_on))
+	]
 	if held:
 		return held[0]
 
@@ -295,7 +303,7 @@ def check_within_contract(contract_name: str, governed: list[frappe._dict]) -> N
 				title=_("Property not under contract"),
 			)
 		start = (contract_row and contract_row.start_date) or contract.start_date
-		end = (contract_row and contract_row.end_date) or contract.end_date
+		end = row_lease_end(contract_row, contract.end_date) if contract_row else contract.end_date
 		coverage = (
 			_("property {0} on Contract {1}").format(line.utility_property, contract.name)
 			if contract_row
@@ -445,6 +453,7 @@ def apply_schedule_rate(doc: Document, row, billing_date, service_request: str) 
 		)
 
 	row.price_list_rate = rate
+	rate = flt(rate * occupied_factor(doc, row, billing_date, service_request), row.precision("rate"))
 	row.rate = rate
 	row.amount = flt(rate) * flt(row.qty or 1)
 
@@ -526,6 +535,8 @@ def before_validate(doc: Document, method: str) -> None:
 	"""Intercepts submit event for document"""
 	# Also here, as invoices inserted with ``ignore_validate`` never reach ``validate``.
 	fill_request_line_dimensions(doc)
+	# Before ERPNext's validate, so the totals it computes use the occupied days rate
+	prorate_vacated_lines(doc)
 	if not doc.taxes:
 		AccountsController.append_taxes_from_item_tax_template(doc)
 		calculate_taxes_and_totals(doc)
@@ -619,6 +630,103 @@ def fill_request_line_dimensions(doc: Document) -> None:
 
 		if cost_center:
 			line.cost_center = cost_center
+
+
+OCCUPIED_DAYS_FIELD = "bill_occupied_days_only"
+APPROVAL_FIELD = "occupancy_approval"
+
+
+def vacated_row_of_line(service_request: str, row):
+	"""Return the vacated Requested Properties row an invoice line bills, if any."""
+	from ...utils.lease_validity import is_vacated
+
+	request = frappe.get_cached_doc(USR_DOCTYPE, service_request)
+	vacated = [r for r in request.get("requested_properties") or [] if is_vacated(r)]
+	if not vacated:
+		return None
+
+	if row.get("utility_property"):
+		return next((r for r in vacated if r.utility_property == row.utility_property), None)
+
+	owners = frappe.get_all(
+		"Utility Property",
+		filters={"name": ("in", [r.utility_property for r in vacated]), "service_item": row.item_code},
+		pluck="name",
+	)
+	return next((r for r in vacated if r.utility_property in owners), None)
+
+
+def occupied_factor(doc: Document, row, billing_date, service_request: str) -> float:
+	"""Return the share of its rent a line bills when the invoice bills occupied days only.
+
+	Only a line billing the month its property was vacated in is cut, to the
+	days occupied that month (see ``lease_validity.occupied_fraction``); every
+	other line, and every line of an invoice billing full months, bills in full.
+	"""
+	if not cint(doc.get(OCCUPIED_DAYS_FIELD)) or not service_request:
+		return 1.0
+
+	vacated = vacated_row_of_line(service_request, row)
+	return occupied_fraction(vacated, billing_date) if vacated else 1.0
+
+
+def prorate_vacated_lines(doc: Document) -> None:
+	"""Set the occupied days rate of vacated lines before ERPNext computes the totals.
+
+	``apply_schedule_rate`` sets the same rate again in ``validate``.
+	"""
+	service_request = doc.get(REQUEST_FIELD)
+	if not (cint(doc.get(OCCUPIED_DAYS_FIELD)) and service_request and is_item_price_approach()):
+		return
+
+	for row in doc.get("items") or []:
+		if not row.item_code or not vacated_row_of_line(service_request, row):
+			continue
+
+		billing_date = getdate(row.get(POSTING_DATE_FIELD) or doc.posting_date)
+		rate = get_rate_for_date(
+			row.item_code,
+			billing_date,
+			customer=doc.customer,
+			price_list=doc.selling_price_list,
+			uom=row.uom,
+			qty=row.qty,
+			conversion_factor=row.conversion_factor or 1,
+			plc_conversion_rate=doc.plc_conversion_rate or 1,
+			conversion_rate=doc.conversion_rate or 1,
+			service_request=service_request,
+		)
+		if rate is not None:
+			row.price_list_rate = rate
+			row.rate = flt(rate * occupied_factor(doc, row, billing_date, service_request), row.precision("rate"))
+
+
+def check_occupied_days_approval(doc: Document, governed: list) -> None:
+	"""Require an approval for billing occupied days only, and something to cut.
+
+	Raises:
+		frappe.ValidationError: When the approval document is missing, or no
+			line bills the month its property was vacated in.
+	"""
+	if not cint(doc.get(OCCUPIED_DAYS_FIELD)):
+		return
+
+	if not doc.get(APPROVAL_FIELD):
+		frappe.throw(
+			_("Attach the signed approval before billing occupied days only."),
+			title=_("Approval needed"),
+		)
+
+	service_request = doc.get(REQUEST_FIELD)
+	if not any(
+		occupied_factor(doc, line.row, line.billing_date, service_request) < 1 for line in governed
+	):
+		frappe.throw(
+			_(
+				"No line bills a month its property was vacated part way through, so there are "
+				"no occupied days to bill. Untick Bill Occupied Days Only."
+			)
+		)
 
 
 def align_invoice_property(doc: Document) -> None:

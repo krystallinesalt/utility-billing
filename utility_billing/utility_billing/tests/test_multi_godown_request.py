@@ -275,3 +275,143 @@ class TestMovingAProperty(MultiGodownCase):
 			[(B_START, "2027-03-31", 7000), ("2027-05-01", "2027-12-31", 9000)],
 		)
 		self.assertEqual(getdate(first.start_date), getdate("2026-01-01"))
+
+
+class TestLeaseStatus(MultiGodownCase):
+	"""Automatic follows the dates, Valid holds the lease over, Invalid releases it."""
+
+	def setUp(self):
+		super().setUp()
+		self.request = fx.make_request(
+			[(A, A_START, A_END), (B, B_START, B_END)], A_START, B_END, billing=True
+		)
+		price(A, 5000, A_START, "2026-12-31")
+		price(B, 7000, B_START, B_END)
+
+	def set_row(self, property_name, **values):
+		request = frappe.get_doc("Utility Service Request", self.request.name)
+		row = next(r for r in request.requested_properties if r.utility_property == property_name)
+		row.update(values)
+		request.save(ignore_permissions=True)
+		return request
+
+	def drafts_on(self, day):
+		with patch.object(auto_repeat, "today", return_value=day):
+			auto_repeat.create_item_price_sales_invoices()
+
+		names = frappe.get_all(
+			"Sales Invoice",
+			filters={"utility_service_request": self.request.name, "posting_date": day, "docstatus": 0},
+			pluck="name",
+		)
+		return {
+			doc.utility_property: doc for doc in (frappe.get_doc("Sales Invoice", name) for name in names)
+		}
+
+	def test_invalid_needs_the_vacated_on_date(self):
+		with self.assertRaisesRegex(frappe.ValidationError, "Vacated On"):
+			self.set_row(B, lease_status="Invalid")
+
+	def test_invalid_releases_the_property(self):
+		request = self.set_row(B, lease_status="Invalid", vacated_on="2026-06-15")
+
+		row = next(r for r in request.requested_properties if r.utility_property == B)
+		self.assertEqual(row.is_active, 0)
+
+	def test_the_vacated_month_is_billed_and_later_ones_are_not(self):
+		self.set_row(B, lease_status="Invalid", vacated_on="2026-06-15")
+
+		self.assertIn(B, self.drafts_on("2026-06-01"))
+		self.assertNotIn(B, self.drafts_on("2026-07-01"))
+		self.assertIn(A, self.drafts_on("2026-07-01"))
+
+	def test_a_held_over_lease_goes_on_billing_the_last_rent(self):
+		self.set_row(A, lease_status="Valid")
+
+		invoices = self.drafts_on("2027-03-01")
+
+		self.assertIn(A, invoices)
+		self.assertEqual(invoices[A].items[0].rate, 5000)
+
+	def test_an_automatic_lease_is_not_billed_after_it_ends(self):
+		self.assertNotIn(A, self.drafts_on("2027-03-01"))
+
+	def test_a_lease_ending_mid_month_bills_that_month_in_full(self):
+		row = next(r for r in self.request.requested_properties if r.utility_property == A)
+		frappe.db.set_value(
+			"Contract Utility Property Item",
+			row.name,
+			{"end_date": "2026-12-15", "billing_date_type": "Last Day of Month"},
+		)
+		price(A, 5000, "2027-01-01", "2027-12-31")
+
+		invoices = self.drafts_on("2026-12-31")
+
+		self.assertIn(A, invoices)
+		self.assertEqual(str(invoices[A].items[0].custom_posting_date), "2026-12-15")
+		self.assertEqual(invoices[A].items[0].rate, 5000)
+
+
+class TestOccupiedDays(MultiGodownCase):
+	"""The vacated month can bill the occupied days only."""
+
+	def test_the_occupied_share_of_the_vacated_month(self):
+		from utility_billing.utility_billing.utils.lease_validity import occupied_fraction
+
+		row = frappe._dict(lease_status="Invalid", vacated_on="2026-06-15", start_date="2026-01-01")
+
+		self.assertAlmostEqual(occupied_fraction(row, "2026-06-30"), 15 / 30)
+		self.assertEqual(occupied_fraction(row, "2026-05-31"), 1.0)
+
+	def test_a_lease_starting_in_the_vacated_month_counts_from_its_start(self):
+		from utility_billing.utility_billing.utils.lease_validity import occupied_fraction
+
+		row = frappe._dict(lease_status="Invalid", vacated_on="2026-06-20", start_date="2026-06-11")
+
+		self.assertAlmostEqual(occupied_fraction(row, "2026-06-30"), 10 / 30)
+
+	def test_only_an_invoice_asking_for_it_is_cut(self):
+		request = fx.make_request([(A, A_START, A_END), (B, B_START, B_END)], A_START, B_END)
+		request.reload()
+		row = next(r for r in request.requested_properties if r.utility_property == B)
+		row.lease_status, row.vacated_on = "Invalid", "2026-06-15"
+		request.save(ignore_permissions=True)
+
+		line = frappe._dict(utility_property=B, item_code=B)
+		full = frappe._dict(bill_occupied_days_only=0)
+		occupied = frappe._dict(bill_occupied_days_only=1)
+
+		self.assertEqual(si_override.occupied_factor(full, line, getdate("2026-06-30"), request.name), 1.0)
+		self.assertAlmostEqual(
+			si_override.occupied_factor(occupied, line, getdate("2026-06-30"), request.name), 0.5
+		)
+		other = frappe._dict(utility_property=A, item_code=A)
+		self.assertEqual(
+			si_override.occupied_factor(occupied, other, getdate("2026-06-30"), request.name), 1.0
+		)
+
+	def test_the_approval_is_required(self):
+		invoice = frappe._dict(bill_occupied_days_only=1, occupancy_approval=None)
+
+		with self.assertRaisesRegex(frappe.ValidationError, "approval"):
+			si_override.check_occupied_days_approval(invoice, [])
+
+
+class TestVacatedContract(MultiGodownCase):
+	"""A Contract whose properties are all vacated still bills the month they were left in."""
+
+	def test_the_vacated_month_is_still_held(self):
+		from utility_billing.utility_billing.utils.contract_status import contract_released
+		from utility_billing.utility_billing.utils.contract_sync import CONSENT_KEY
+
+		request = fx.make_request([(A, A_START, A_END)], A_START, A_END)
+		contract = fx.make_contract(request.name)
+		request.reload()
+		request.requested_properties[0].lease_status = "Invalid"
+		request.requested_properties[0].vacated_on = "2026-06-15"
+		request.set(CONSENT_KEY, 1)
+		request.save(ignore_permissions=True)
+
+		self.assertFalse(contract_released(contract.name, "2026-06-30"))
+		self.assertTrue(contract_released(contract.name, "2026-07-31"))
+		self.assertTrue(contract_released(contract.name))

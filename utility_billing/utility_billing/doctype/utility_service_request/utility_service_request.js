@@ -422,6 +422,32 @@ frappe.ui.form.on("Contract Utility Property Item", {
 		set_header_dates_from_rows(frm);
 	},
 
+	lease_status: function (frm, cdt, cdn) {
+		const row = locals[cdt][cdn];
+		if (row.lease_status === "Invalid") {
+			// The tenant has left: the property is released once the request is saved
+			frappe.model.set_value(cdt, cdn, "is_active", 0);
+			frappe.show_alert({
+				message: __(
+					"Set the Vacated On date of {0}. Its month is billed in full; the invoice can bill occupied days only with a signed approval.",
+					[row.utility_property || __("this property")],
+				),
+				indicator: "orange",
+			});
+		} else {
+			frappe.model.set_value(cdt, cdn, "vacated_on", null);
+			if (row.lease_status === "Valid") {
+				frappe.show_alert({
+					message: __(
+						"{0} is held over: billing goes on every month at the last rent until the lease is marked Invalid.",
+						[row.utility_property || __("This property")],
+					),
+					indicator: "blue",
+				});
+			}
+		}
+	},
+
 	start_date: (frm, cdt, cdn) => update_child_contract_fields(frm, cdt, cdn, "start_date"),
 	end_date: (frm, cdt, cdn) => update_child_contract_fields(frm, cdt, cdn, "end_date"),
 	contract_length_months: (frm, cdt, cdn) =>
@@ -2470,10 +2496,16 @@ function build_summary_period_row($block) {
 			<td class="text-right uips-rate-col">
 				<input type="number" step="0.01" min="0" class="form-control input-sm uips-input uips-rate">
 			</td>
+			<td class="uips-remarks-col">
+				<input type="text" maxlength="350" class="form-control input-sm uips-input uips-remarks"
+					placeholder="${__("Why this rate, e.g. a discount")}">
+			</td>
 			<td class="text-right">
-				<button type="button" class="btn btn-xs btn-link uips-remove-row"
+				<button type="button" class="btn btn-xs btn-link text-danger uips-remove-row"
 					title="${__("Remove period")}" aria-label="${__("Remove period")}">
-					${frappe.utils.icon("x", "sm")}
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+						stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+						<path d="M18 6 6 18M6 6l12 12"/></svg>
 				</button>
 			</td>
 		</tr>`,
@@ -2564,6 +2596,7 @@ function collect_property_periods($block) {
 			valid_upto,
 			price_list_rate: flt(rate),
 			customer: $row.attr("data-customer") || null,
+			period_remarks: ($row.find(".uips-remarks").val() || "").slice(0, 350),
 		});
 	});
 

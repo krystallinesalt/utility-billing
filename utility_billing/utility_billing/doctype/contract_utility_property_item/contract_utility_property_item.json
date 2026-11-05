@@ -12,6 +12,8 @@
     "column_break_mplw",
     "start_date",
     "end_date",
+    "lease_status",
+    "vacated_on",
     "section_break_auto_billing",
     "enable_auto_billing",
     "rent_billing_approach",
@@ -20,7 +22,9 @@
     "billing_day_of_month",
     "column_break_cqbg",
     "contract_length_months",
-    "insurance"
+    "insurance",
+    "section_break_remarks",
+    "remarks"
   ],
   "fields": [
     {
@@ -159,13 +163,47 @@
     {
       "fieldname": "column_break_mplw",
       "fieldtype": "Column Break"
+    },
+    {
+      "allow_on_submit": 1,
+      "columns": 1,
+      "default": "Automatic",
+      "fieldname": "lease_status",
+      "fieldtype": "Select",
+      "in_list_view": 1,
+      "in_standard_filter": 1,
+      "label": "Lease Status",
+      "options": "Automatic\nValid\nInvalid",
+      "description": "Automatic: billed by the lease dates, the last month in full. Valid: the lease has ended but the tenant still occupies, billing goes on at the last rent. Invalid: the tenant has left on the Vacated On date and the property is released."
+    },
+    {
+      "allow_on_submit": 1,
+      "depends_on": "eval:doc.lease_status=='Invalid'",
+      "mandatory_depends_on": "eval:doc.lease_status=='Invalid'",
+      "fieldname": "vacated_on",
+      "fieldtype": "Date",
+      "label": "Vacated On",
+      "description": "The month of this date is the last one billed, in full unless the invoice bills occupied days only."
+    },
+    {
+      "fieldname": "section_break_remarks",
+      "fieldtype": "Section Break",
+      "label": "Remarks"
+    },
+    {
+      "allow_on_submit": 1,
+      "fieldname": "remarks",
+      "fieldtype": "Data",
+      "length": 350,
+      "label": "Remarks",
+      "description": "Up to 350 characters."
     }
   ],
   "grid_page_length": 50,
   "index_web_pages_for_search": 1,
   "istable": 1,
   "links": [],
-  "modified": "2026-10-22 10:18:40.051929",
+  "modified": "2026-11-05 12:00:00.000000",
   "modified_by": "Administrator",
   "module": "Utility Billing",
   "name": "Contract Utility Property Item",

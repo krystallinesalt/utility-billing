@@ -41,6 +41,20 @@ frappe.ui.form.on("Sales Invoice", {
 	utility_service_request: function (frm) {
 		load_service_request_lines(frm, true);
 	},
+
+	bill_occupied_days_only: function (frm) {
+		if (frm.doc.bill_occupied_days_only) {
+			frappe.show_alert({
+				message: __(
+					"Attach the signed approval. The rent of the vacated month is cut to the days occupied when you save.",
+				),
+				indicator: "orange",
+			});
+		} else {
+			// Back to the full month rate
+			(frm.doc.items || []).forEach((row) => enforce_governed_rate(frm, row.doctype, row.name));
+		}
+	},
 });
 
 frappe.ui.form.on("Sales Invoice Item", {
@@ -361,6 +375,9 @@ function enforce_governed_rate(frm, cdt, cdn) {
 	const line = get_governed_line(frm, row);
 
 	if (!line) return false;
+
+	// The server sets the occupied days rate of a vacated month on save
+	if (frm.doc.bill_occupied_days_only && line.role === "primary") return true;
 
 	if (line.role === "secondary") {
 		set_governed_rate(frm, row, flt(line.rate));

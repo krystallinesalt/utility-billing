@@ -84,7 +84,7 @@ def _render_property(section: dict, editable: bool) -> str:
     empty = (
         ""
         if prices
-        else "<tr class='uips-empty-row'><td colspan='5' class='text-muted'>"
+        else f"<tr class='uips-empty-row'><td colspan='{6 if editable else 5}' class='text-muted'>"
         + _("No Item Prices created yet.")
         + "</td></tr>"
     )
@@ -103,11 +103,21 @@ def _render_property(section: dict, editable: bool) -> str:
         + "<table class='table table-bordered uips-table'><thead><tr>"
         + "<th>From</th><th>To</th><th>Customer</th>"
         + "<th class='text-right uips-rate-col'>Rate</th>"
+        + f"<th class='uips-remarks-col'>{_('Remarks')}</th>"
         + action_header
         + f"</tr></thead><tbody>{rows}{empty}</tbody></table>"
         + add_row
         + "</div>"
     )
+
+
+#: Drawn inline rather than from the desk's icon sprite, whose ids differ between
+#: Frappe versions (``#icon-x`` is missing on v16, leaving the button blank).
+REMOVE_ICON = (
+    "<svg width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor'"
+    " stroke-width='2.5' stroke-linecap='round' aria-hidden='true'>"
+    "<path d='M18 6 6 18M6 6l12 12'/></svg>"
+)
 
 
 def _render_row(price: dict, editable: bool) -> str:
@@ -131,6 +141,7 @@ def _render_row(price: dict, editable: bool) -> str:
             f"<td>{_display_date(price.get('valid_upto'))}</td>"
             f"<td class='uips-customer'>{escape_html(customer)}</td>"
             f"<td class='text-right uips-rate-col'>{_rate(price.get('price_list_rate'))}</td>"
+            f"<td class='uips-remarks-col'>{escape_html(price.get('period_remarks') or '')}</td>"
             "</tr>"
         )
 
@@ -148,10 +159,15 @@ def _render_row(price: dict, editable: bool) -> str:
         " class='form-control input-sm uips-input uips-rate'"
         f" value=\"{_rate(price.get('price_list_rate'))}\">"
         "</td>"
+        "<td class='uips-remarks-col'>"
+        "<input type='text' maxlength='350' class='form-control input-sm uips-input uips-remarks'"
+        f" placeholder=\"{_('Why this rate, e.g. a discount')}\""
+        f" value=\"{escape_html(price.get('period_remarks') or '')}\">"
+        "</td>"
         "<td class='text-right'>"
-        "<button type='button' class='btn btn-xs btn-link uips-remove-row'"
+        "<button type='button' class='btn btn-xs btn-link text-danger uips-remove-row'"
         f" title=\"{_('Remove period')}\" aria-label=\"{_('Remove period')}\">"
-        "<svg class='icon icon-sm' aria-hidden='true'><use href='#icon-x'></use></svg>"
+        f"{REMOVE_ICON}"
         "</button>"
         "</td>"
         "</tr>"

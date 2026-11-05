@@ -34,15 +34,27 @@ def all_rows_released(doc) -> bool:
 	return bool(rows) and not any(cint(row.is_active) for row in rows)
 
 
-def contract_released(contract_name: str) -> bool:
-	"""Return whether every property row of a saved Contract is released."""
+def contract_released(contract_name: str, on=None) -> bool:
+	"""Return whether every property row of a saved Contract is released.
+
+	With ``on``, a row vacated (Lease Status Invalid) in the month of ``on`` or
+	later still counts as held: the month a tenant left in is still billed.
+	"""
 	rows = frappe.get_all(
 		ROW_DOCTYPE,
 		filters={"parent": contract_name, "parenttype": "Contract", "utility_property": ("is", "set")},
-		pluck="is_active",
+		fields=["is_active", "lease_status", "vacated_on"],
 	)
 
-	return bool(rows) and not any(cint(value) for value in rows)
+	def held(row) -> bool:
+		if cint(row.is_active):
+			return True
+		if not (on and row.get("lease_status") == "Invalid" and row.get("vacated_on")):
+			return False
+		vacated, billed = getdate(row.vacated_on), getdate(on)
+		return (vacated.year, vacated.month) >= (billed.year, billed.month)
+
+	return bool(rows) and not any(held(row) for row in rows)
 
 
 def set_inactive_when_released(doc) -> None:
@@ -75,7 +87,7 @@ def released_property_status(doc, entry) -> str:
 	return "Available"
 
 
-def contract_requirement_blocks(service_request: str) -> bool:
+def contract_requirement_blocks(service_request: str, on=None) -> bool:
 	"""Return whether Require Contract stops billing a request, under Item Price only.
 
 	The daily Item Price job inserts its drafts without validation, so it checks
@@ -99,7 +111,7 @@ def contract_requirement_blocks(service_request: str) -> bool:
 		filters["is_signed"] = 1
 	names = frappe.get_all("Contract", filters=filters, pluck="name")
 
-	return not names or all(contract_released(name) for name in names)
+	return not names or all(contract_released(name, on) for name in names)
 
 
 def set_released_contracts_inactive() -> list[str]:

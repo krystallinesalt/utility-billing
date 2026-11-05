@@ -18,6 +18,8 @@ import frappe
 from frappe.query_builder import DocType
 from frappe.utils import getdate, today
 
+from utility_billing.utility_billing.utils.lease_validity import row_lease_end
+
 REQUEST_DOCTYPE = "Utility Service Request"
 ROW_DOCTYPE = "Contract Utility Property Item"
 
@@ -52,6 +54,7 @@ def get_live_leases(
 			row.utility_property,
 			row.start_date,
 			row.end_date,
+			row.lease_status,
 			request.start_date.as_("request_start"),
 			request.end_date.as_("request_end"),
 		)
@@ -69,7 +72,7 @@ def get_live_leases(
 	leases = []
 	for entry in rows:
 		start = entry.start_date or entry.request_start
-		end = entry.end_date or entry.request_end
+		end = row_lease_end(entry, entry.request_end)
 		leases.append(
 			{
 				"utility_property": entry.utility_property,

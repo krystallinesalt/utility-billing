@@ -22,6 +22,8 @@ import frappe
 from frappe import _
 from frappe.utils import getdate
 
+from utility_billing.utility_billing.utils.lease_validity import is_vacated, row_lease_end
+
 PRICE_FIELDS = [
 	"name",
 	"item_code",
@@ -30,6 +32,7 @@ PRICE_FIELDS = [
 	"valid_from",
 	"valid_upto",
 	"price_list_rate",
+	"period_remarks",
 ]
 
 
@@ -76,8 +79,13 @@ def lease_window(service_request, property_name: str) -> tuple:
 	dates are the fallback. ``end`` is ``None`` for an open ended lease.
 	"""
 	row = next((r for r in active_rows(service_request) if r.utility_property == property_name), None)
+	# A vacated property still bills the month it was left in
+	row = row or next(
+		(r for r in service_request.get("requested_properties") or [] if r.utility_property == property_name and is_vacated(r)),
+		None,
+	)
 	start = (row and row.start_date) or service_request.start_date
-	end = (row and row.end_date) or service_request.end_date
+	end = row_lease_end(row, service_request.end_date) if row else service_request.end_date
 
 	return (getdate(start) if start else None, getdate(end) if end else None)
 

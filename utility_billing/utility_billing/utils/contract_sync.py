@@ -46,6 +46,8 @@ def contract_terms(doc) -> tuple:
 			_date(row.start_date),
 			_date(row.end_date),
 			cint(row.get("is_active")),
+			row.get("lease_status") or "Automatic",
+			_date(row.get("vacated_on")),
 		)
 		for row in doc.get("requested_properties") or []
 		if row.utility_property
