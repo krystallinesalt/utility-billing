@@ -230,3 +230,48 @@ class TestBulkInvoiceGroups(MultiGodownCase):
 				(fx.CUSTOMER, request.name, B): [b1],
 			},
 		)
+
+
+class TestMovingAProperty(MultiGodownCase):
+	"""A property released on one request and added to another keeps its prices."""
+
+	def test_prices_of_the_added_property_are_left_alone(self):
+		from utility_billing.utility_billing.utils.contract_sync import CONSENT_KEY
+
+		first = fx.make_request([(A, "2026-01-01", "2028-12-01")], "2026-01-01", "2028-12-01")
+		second = fx.make_request([(B, B_START, "2027-04-01")], B_START, "2027-04-01")
+		price(B, 7000, B_START, "2027-03-31")
+		# A later price of the same customer and item, inside the first request's dates
+		price(B, 9000, "2027-05-01", "2027-12-31")
+
+		second.reload()
+		second.requested_properties[0].is_active = 0
+		second.set(CONSENT_KEY, 1)
+		second.save(ignore_permissions=True)
+
+		first.reload()
+		first.append(
+			"requested_properties",
+			{
+				"utility_property": B,
+				"item_code": B,
+				"start_date": B_START,
+				"end_date": "2027-04-01",
+				"is_active": 1,
+				"rent_billing_approach": "Item Price",
+			},
+		)
+		first.set(CONSENT_KEY, 1)
+		first.save(ignore_permissions=True)
+
+		prices = frappe.get_all(
+			"Item Price",
+			filters={"item_code": B, "price_list": fx.PRICE_LIST, "customer": fx.CUSTOMER},
+			fields=["valid_from", "valid_upto", "price_list_rate"],
+			order_by="valid_from",
+		)
+		self.assertEqual(
+			[(str(p.valid_from), str(p.valid_upto), p.price_list_rate) for p in prices],
+			[(B_START, "2027-03-31", 7000), ("2027-05-01", "2027-12-31", 9000)],
+		)
+		self.assertEqual(getdate(first.start_date), getdate("2026-01-01"))

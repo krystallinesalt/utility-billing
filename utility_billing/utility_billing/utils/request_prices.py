@@ -307,7 +307,14 @@ def adjust_prices_to_window(service_request, before) -> None:
 	if not is_item_price_approach():
 		return
 
+	held_before = {row.utility_property for row in active_rows(before)}
 	for property_name, item_code in property_service_items(service_request).items():
+		# A property added by this update owned no prices before it: its "old"
+		# window would only be the request's dates, which may hold prices of
+		# the same customer and item owned by another lease of the property.
+		if property_name not in held_before:
+			continue
+
 		old = lease_window(before, property_name)
 		new = lease_window(service_request, property_name)
 		if old == new:
@@ -342,10 +349,12 @@ def validate_lease_move(service_request, before) -> None:
 	if not is_item_price_approach():
 		return
 
+	held_before = {row.utility_property for row in active_rows(before)}
 	moved = {
 		item_code
 		for property_name, item_code in property_service_items(service_request).items()
-		if lease_window(before, property_name) != lease_window(service_request, property_name)
+		if property_name in held_before
+		and lease_window(before, property_name) != lease_window(service_request, property_name)
 	}
 	if moved:
 		validate_unshared_service_items(service_request, moved)
@@ -355,7 +364,7 @@ def validate_lease_move(service_request, before) -> None:
 
 	for property_name, item_code in property_service_items(service_request).items():
 		start, end = lease_window(service_request, property_name)
-		if lease_window(before, property_name) == (start, end):
+		if property_name not in held_before or lease_window(before, property_name) == (start, end):
 			continue
 
 		billed = (
