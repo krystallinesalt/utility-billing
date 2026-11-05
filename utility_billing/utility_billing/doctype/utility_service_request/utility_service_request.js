@@ -8,6 +8,7 @@ const MONTHS_PER_FREQUENCY = { Monthly: 1, Quarterly: 3, "Half-yearly": 6, Yearl
 
 frappe.ui.form.on("Utility Service Request", {
 	refresh: async function (frm) {
+		toggle_header_dates(frm);
 		frm.toggle_display("address_html", !frm.is_new());
 		frm.toggle_display("contact_html", !frm.is_new());
 		frm.ignore_doctypes_on_cancel_all = ["BOM"];
@@ -385,6 +386,13 @@ frappe.ui.form.on("Contract Utility Property Item", {
 			await frappe.model.set_value(cdt, cdn, "rent_billing_approach", billing_approach);
 		}
 
+		// Each property has its own lease: only the first one starts from the
+		// dates typed on the request; later ones are dated by the user.
+		const others = dated_property_rows(frm).filter((d) => d.name !== cdn);
+		if (others.length) {
+			return;
+		}
+
 		if (frm.doc.start_date) {
 			frappe.model.set_value(cdt, cdn, "start_date", frm.doc.start_date);
 		}
@@ -411,6 +419,7 @@ frappe.ui.form.on("Contract Utility Property Item", {
 
 	requested_properties_remove: function (frm) {
 		sync_items_from_properties(frm);
+		set_header_dates_from_rows(frm);
 	},
 
 	start_date: (frm, cdt, cdn) => update_child_contract_fields(frm, cdt, cdn, "start_date"),
@@ -575,50 +584,79 @@ function set_dynamic_field_label(frm) {
 function update_child_contract_fields(frm, cdt, cdn, changed_field) {
 	const row = locals[cdt][cdn];
 
-	const parent_start = frm.doc.start_date
-		? frappe.datetime.str_to_obj(frm.doc.start_date)
-		: null;
-	const parent_end = frm.doc.end_date ? frappe.datetime.str_to_obj(frm.doc.end_date) : null;
-
 	const start = row.start_date ? frappe.datetime.str_to_obj(row.start_date) : null;
 	const end = row.end_date ? frappe.datetime.str_to_obj(row.end_date) : null;
 	const length = row.contract_length_months;
 
-	if (start && parent_start && start < parent_start) {
-		frappe.model.set_value(cdt, cdn, "start_date", null);
-		frappe.msgprint("Property start date cannot be before contract start date.");
+	if (start && end && end < start) {
+		frappe.model.set_value(cdt, cdn, changed_field, null);
+		frappe.msgprint(__("Property end date cannot be before its start date."));
 		return;
 	}
 
-	if (end && parent_end && end > parent_end) {
-		frappe.model.set_value(cdt, cdn, "end_date", null);
-		frappe.msgprint("Property end date cannot be after contract end date.");
-		return;
-	}
-
-	if (changed_field === "start_date" && end) {
-		const diff = get_month_diff(end, start);
-		frappe.model.set_value(cdt, cdn, "contract_length_months", diff);
-	} else if (changed_field === "end_date" && start) {
-		const diff = get_month_diff(end, start);
-		frappe.model.set_value(cdt, cdn, "contract_length_months", diff);
-	} else if (changed_field === "contract_length_months" && start && length != null) {
-		let new_end = frappe.datetime.add_months(start, length);
-		const parent_end_date = parent_end ? frappe.datetime.str_to_obj(parent_end) : null;
-		const new_end_date = new_end ? new_end : null;
-
-		if (parent_end_date && new_end_date && new_end_date > parent_end_date) {
-			new_end = parent_end_date;
-			frappe.msgprint("Adjusted property end date to match contract end date.");
-		}
-
+	if (changed_field === "contract_length_months" && start && length) {
+		const new_end = frappe.datetime.add_months(start, length);
 		frappe.model.set_value(cdt, cdn, "end_date", frappe.datetime.obj_to_str(new_end));
+	} else if (row.start_date && row.end_date) {
+		const diff = get_month_diff(row.start_date, row.end_date);
+		if (diff !== row.contract_length_months) {
+			frappe.model.set_value(cdt, cdn, "contract_length_months", diff);
+		}
 	}
 
-	if (row.start_date && row.end_date) {
-		const diff = get_month_diff(row.start_date, row.end_date);
-		frappe.model.set_value(cdt, cdn, "contract_length_months", diff);
+	set_header_dates_from_rows(frm);
+}
+
+function dated_property_rows(frm) {
+	return (frm.doc.requested_properties || []).filter((d) => d.start_date);
+}
+
+/**
+ * Set the request's dates to the envelope of its property rows: the earliest
+ * start and the latest end, or no end when a row is open ended. Mirrors
+ * ``UtilityServiceRequest.set_dates_from_properties`` on the server.
+ */
+function set_header_dates_from_rows(frm) {
+	const rows = dated_property_rows(frm);
+	toggle_header_dates(frm);
+	if (!rows.length) {
+		return;
 	}
+
+	const starts = rows.map((d) => d.start_date).sort();
+	const open_ended = rows.some((d) => !d.end_date);
+	const ends = rows.map((d) => d.end_date).filter(Boolean).sort();
+	const start = starts[0];
+	const end = open_ended ? null : ends[ends.length - 1];
+
+	if (frm.doc.start_date !== start) {
+		frm.doc.start_date = start;
+	}
+	if ((frm.doc.end_date || null) !== end) {
+		frm.doc.end_date = end;
+	}
+	if (frm.doc.docstatus === 0) {
+		frm.doc.contract_length_months = end ? get_month_diff(start, end) : 0;
+	}
+	frm.dirty();
+	frm.refresh_fields(["start_date", "end_date", "contract_length_months"]);
+}
+
+function toggle_header_dates(frm) {
+	const derived = dated_property_rows(frm).length > 0;
+	["start_date", "end_date", "contract_length_months"].forEach((field) => {
+		frm.set_df_property(field, "read_only", derived ? 1 : 0);
+	});
+	frm.set_df_property(
+		"start_date",
+		"description",
+		derived ? __("Earliest start of the Requested Properties") : "",
+	);
+	frm.set_df_property(
+		"end_date",
+		"description",
+		derived ? __("Latest end of the Requested Properties (empty when one is open ended)") : "",
+	);
 }
 
 function get_month_diff(start_date, end_date) {
@@ -638,6 +676,10 @@ function get_month_diff(start_date, end_date) {
 }
 
 function update_contract_fields(frm, changed_field) {
+	// Derived from the property rows, see set_header_dates_from_rows
+	if (dated_property_rows(frm).length) {
+		return;
+	}
 	const start = frm.doc.start_date ? frappe.datetime.str_to_obj(frm.doc.start_date) : null;
 	const end = frm.doc.end_date ? frappe.datetime.str_to_obj(frm.doc.end_date) : null;
 	const length = frm.doc.contract_length_months;
@@ -960,18 +1002,75 @@ function configure_dialog(dialog, frm) {
  * @param {object} frm - The Utility Service Request form.
  * @param {string} docType - "Sales Order" or "Sales Invoice".
  */
+const BILL_SHARED = "__shared__";
+const BILL_ALL = "__all__";
+
+/**
+ * Open a new Sales Order or Sales Invoice for the request.
+ *
+ * A request leasing several properties bills each on its own document, so the
+ * user first picks what the document is for: one property (its own lines
+ * only), the charges shared by the whole request, or everything at once.
+ */
 function open_new_sales_document(frm, docType) {
+	const rows = (frm.doc.requested_properties || []).filter(
+		(row) => row.utility_property && row.is_active !== 0,
+	);
+	const properties = [...new Set(rows.map((row) => row.utility_property))];
+
+	if (properties.length <= 1) {
+		// One property: the document bills every line of the request, as before.
+		open_sales_document_for(frm, docType, BILL_ALL, properties[0] || null);
+		return;
+	}
+
+	const has_shared = (frm.doc.items || []).some((item) => item.item_code && !item.utility_property);
+	const fmt = (date) => (date ? frappe.datetime.str_to_user(date) : __("open ended"));
+	const options = rows.map((row) => ({
+		value: row.utility_property,
+		label: `${row.utility_property} (${fmt(row.start_date)} – ${fmt(row.end_date)})`,
+	}));
+	if (has_shared) {
+		options.push({ value: BILL_SHARED, label: __("Shared charges (not tied to a property)") });
+	}
+	options.push({ value: BILL_ALL, label: __("All properties on one document") });
+
+	const dialog = new frappe.ui.Dialog({
+		title: __("New {0}", [__(docType)]),
+		fields: [
+			{
+				fieldname: "scope",
+				fieldtype: "Select",
+				label: __("Property to bill"),
+				options: options,
+				default: options[0].value,
+				reqd: 1,
+				description: __(
+					"Each property is billed on its own {0}. Repeat for the other properties.",
+					[__(docType)],
+				),
+			},
+		],
+		primary_action_label: __("Create"),
+		primary_action(values) {
+			dialog.hide();
+			open_sales_document_for(frm, docType, values.scope);
+		},
+	});
+	dialog.show();
+}
+
+function open_sales_document_for(frm, docType, scope, only_property = null) {
 	const today = frappe.datetime.get_today();
-	const properties = (frm.doc.requested_properties || [])
-		.map((row) => row.utility_property)
-		.filter(Boolean);
+	const property =
+		scope === BILL_ALL || scope === BILL_SHARED ? only_property : scope;
 
 	const values = {
 		company: frm.doc.company || frappe.defaults.get_user_default("Company"),
 		customer: frm.doc.customer,
 		customer_name: frm.doc.customer_name,
 		utility_service_request: frm.doc.name,
-		utility_property: properties.length === 1 ? properties[0] : null,
+		utility_property: property,
 	};
 
 	if (docType === "Sales Order") {
@@ -997,7 +1096,12 @@ function open_new_sales_document(frm, docType) {
 		values.terms = frm.doc.terms;
 	}
 
-	const usr_items = (frm.doc.items || []).filter((row) => row.item_code);
+	const usr_items = (frm.doc.items || []).filter((row) => {
+		if (!row.item_code) return false;
+		if (scope === BILL_ALL) return true;
+		if (scope === BILL_SHARED) return !row.utility_property;
+		return row.utility_property === property;
+	});
 
 	// This function owns the new document's rows until they are all in: the
 	// Sales Invoice's own utility handling (linking a request and pre-filling
@@ -1396,8 +1500,9 @@ async function addActionButtons(frm) {
 				!contractName &&
 				(!settings?.require_deposit_before_contract_creation || depositName);
 
-			const isItemPriceApproach =
-				frm.doc.requested_properties[0]?.rent_billing_approach === "Item Price";
+			// The server decides from Utility Billing Settings (item_price_scope),
+			// so the form does too rather than from whichever row comes first.
+			const isItemPriceApproach = settings?.rent_billing_approach === "Item Price";
 
 			if (isItemPriceApproach) {
 				frm.add_custom_button(

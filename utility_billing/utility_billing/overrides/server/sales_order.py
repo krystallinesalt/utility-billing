@@ -51,6 +51,7 @@ def enqueue_sales_invoice_creation(source_names):
 
     orders_by_customer = get_unique_customers_and_orders(source_names)
     num_customers = len(orders_by_customer)
+    num_invoices = len(get_invoice_groups(source_names))
 
     frappe.enqueue(
         create_sales_invoices_in_background,
@@ -61,16 +62,14 @@ def enqueue_sales_invoice_creation(source_names):
     )
 
     return _(
-        "Started a background job to create Sales Invoice(s) for {0} customer(s)."
-    ).format(num_customers)
+        "Started a background job to create {0} Sales Invoice(s) for {1} customer(s)."
+    ).format(num_invoices, num_customers)
 
 
 @frappe.whitelist()
 def create_sales_invoices_in_background(source_names):
-    """Create Sales Invoices in the background."""
-    orders_by_customer = get_unique_customers_and_orders(source_names)
-
-    for customer, orders in orders_by_customer.items():
+    """Create Sales Invoices in the background, one per invoice group (see ``get_invoice_groups``)."""
+    for (customer, _service_request, _utility_property), orders in get_invoice_groups(source_names).items():
         try:
             make_sales_invoice(orders)
             for order in orders:
@@ -92,6 +91,44 @@ def create_sales_invoices_in_background(source_names):
                 )
             )
             continue
+
+
+def get_invoice_groups(source_names) -> dict[tuple, list[str]]:
+    """Group Sales Orders into the invoices they are merged into.
+
+    Orders are merged per customer, Utility Service Request and Utility
+    Property: a request leasing several properties bills each property on its
+    own invoice, and orders of different requests never share an invoice.
+    Orders without a request or property group per customer as before.
+
+    Returns:
+        Mapping of ``(customer, utility_service_request, utility_property)`` to
+        the names of the orders merged into that invoice, in the given order.
+    """
+    source_names = parse_source_names(source_names)
+    has_property = frappe.get_meta("Sales Order").has_field("utility_property")
+    fields = ["name", "customer", "utility_service_request"]
+    if has_property:
+        fields.append("utility_property")
+
+    orders = {
+        order.name: order
+        for order in frappe.get_all("Sales Order", filters={"name": ("in", list(source_names))}, fields=fields)
+    }
+
+    groups: dict[tuple, list[str]] = {}
+    for source_name in source_names:
+        order = orders.get(source_name)
+        if not order:
+            continue
+        key = (
+            order.customer,
+            order.get("utility_service_request") or None,
+            order.get("utility_property") or None,
+        )
+        groups.setdefault(key, []).append(source_name)
+
+    return groups
 
 
 @frappe.whitelist()

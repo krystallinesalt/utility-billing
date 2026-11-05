@@ -211,11 +211,22 @@ class TestChecksRunFirst(ContractSyncCase):
 
 		self.assert_untouched(add_x, "already leased")
 
-	def test_a_row_outside_the_request_dates_is_refused(self):
-		def outside(request):
-			request.requested_properties[0].end_date = getdate(add_months(END, 1))
+	def test_a_row_ending_before_it_starts_is_refused(self):
+		def backwards(request):
+			request.requested_properties[0].end_date = getdate(add_months(START, -1))
 
-		self.assert_untouched(outside, "cannot be after contract end date")
+		self.assert_untouched(backwards, "cannot be before its start date")
+
+	def test_a_row_past_the_request_end_widens_the_request_and_contract(self):
+		later = getdate(add_months(END, 1))
+
+		def extend(request):
+			request.requested_properties[0].end_date = later
+
+		request = self.edit(extend, consent=True)
+
+		self.assertEqual(getdate(request.end_date), later)
+		self.assertEqual(contract_view(self.contract.name)[2], later)
 
 	def test_a_lease_move_refusal_comes_first(self):
 		with patch(f"{REQUEST_MODULE}.validate_lease_move", side_effect=frappe.ValidationError("lease move refused")):

@@ -101,12 +101,14 @@ def get_request_lines(service_request: str) -> dict[str, frappe._dict]:
 
 	Returns:
 		Mapping of item code to ``item_code``, ``role`` (primary or secondary),
-		``rate``, ``qty`` and ``uom`` of the request row.
+		``rate``, ``qty``, ``uom`` and ``utility_property`` (the leased property
+		the row bills, empty for a charge shared by the whole request) of the
+		request row.
 	"""
 	rows = frappe.get_all(
 		USR_ITEM_DOCTYPE,
 		filters={"parent": service_request, "parenttype": USR_DOCTYPE},
-		fields=["item_code", "rate", "qty", "uom"],
+		fields=["item_code", "rate", "qty", "uom", "utility_property"],
 		order_by="idx asc",
 	)
 	utility_items = get_utility_items(row.item_code for row in rows)
@@ -123,6 +125,7 @@ def get_request_lines(service_request: str) -> dict[str, frappe._dict]:
 			rate=flt(row.rate),
 			qty=flt(row.qty) or 1,
 			uom=row.uom,
+			utility_property=row.utility_property,
 		)
 
 	return lines
@@ -286,10 +289,15 @@ def get_lease_periods(service_request: str, lines: dict) -> dict[str, frappe._di
 	"""Return the lease period each governed line of a request is billed within.
 
 	A primary line bills the lease of the requested property it is the rent
-	item of. A secondary line belongs to no single property, so it bills within
-	the span of the request's properties: from the earliest lease start to the
-	latest lease end, open ended when any of them is. A request without
-	properties uses its own Contract Details.
+	item of. A secondary line tied to a requested property on the request (its
+	row's ``utility_property``) bills within that property's lease. Any other
+	secondary line belongs to no single property, so it bills within the span
+	of the request's properties: from the earliest lease start to the latest
+	lease end, open ended when any of them is. A request without properties
+	uses its own Contract Details.
+
+	Lines are keyed by item code, so a secondary item is tied to at most one
+	property per request.
 
 	Args:
 		service_request: ``Utility Service Request`` name.
@@ -343,6 +351,14 @@ def get_lease_periods(service_request: str, lines: dict) -> dict[str, frappe._di
 			leases[item_code] = frappe._dict(
 				label=_("property {0}").format(owners[0]),
 				utility_property=owners[0],
+				start=start,
+				end=end,
+			)
+		elif line.get("utility_property") in periods:
+			start, end = periods[line.utility_property]
+			leases[item_code] = frappe._dict(
+				label=_("property {0}").format(line.utility_property),
+				utility_property=line.utility_property,
 				start=start,
 				end=end,
 			)

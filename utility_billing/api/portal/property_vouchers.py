@@ -7,7 +7,10 @@ Customers, plus the payment entries allocated against them.
 A property is reached from a voucher through the meter readings it references
 (``Sales Invoice Item.meter_reading``, ``Sales Invoice Meter Reading.meter_reading``
 and the Sales Order equivalents) or through its ``utility_service_request``
-header link. ``Payment Entry`` has no property link of its own; it is reached
+header link. A request may lease several properties, each billed on its own
+voucher, so a voucher reached through its request belongs to the property when
+its ``utility_property`` (header or line) is that property; a voucher naming no
+property anywhere still belongs to every property of its request. ``Payment Entry`` has no property link of its own; it is reached
 through ``Payment Entry Reference`` rows pointing at those vouchers.
 
 Permissions are bypassed deliberately (query builder / ``frappe.db``) because
@@ -71,6 +74,7 @@ def get_sales_orders(
 	customer_names: list[str],
 	meter_reading_names: list[str],
 	service_request_names: list[str],
+	property_name: str | None = None,
 ) -> list:
 	"""Return the caller's Sales Orders that relate to the property."""
 	return _get_vouchers(
@@ -80,6 +84,7 @@ def get_sales_orders(
 		customer_names,
 		meter_reading_names,
 		service_request_names,
+		property_name,
 	)
 
 
@@ -87,6 +92,7 @@ def get_sales_invoices(
 	customer_names: list[str],
 	meter_reading_names: list[str],
 	service_request_names: list[str],
+	property_name: str | None = None,
 ) -> list:
 	"""Return the caller's Sales Invoices that relate to the property."""
 	return _get_vouchers(
@@ -96,6 +102,7 @@ def get_sales_invoices(
 		customer_names,
 		meter_reading_names,
 		service_request_names,
+		property_name,
 	)
 
 
@@ -149,6 +156,7 @@ def _get_vouchers(
 	customer_names: list[str],
 	meter_reading_names: list[str],
 	service_request_names: list[str],
+	property_name: str | None = None,
 ) -> list:
 	"""Return Sales Orders/Invoices linked through meter readings or service requests."""
 	voucher = DocType(doctype)
@@ -158,6 +166,8 @@ def _get_vouchers(
 		condition = voucher.name.isin(parent_names)
 	elif service_request_names:
 		condition = voucher.utility_service_request.isin(service_request_names)
+		if property_name:
+			condition = condition & _property_condition(voucher, doctype, service_request_names, property_name)
 	else:
 		return []
 
@@ -172,6 +182,41 @@ def _get_vouchers(
 		.orderby(getattr(voucher, date_field), order=Order.desc)
 		.run(as_dict=True)
 	)
+
+
+def _property_condition(voucher, doctype: str, service_request_names: list[str], property_name: str):
+	"""Return the condition keeping a request's vouchers to those of one property.
+
+	A voucher is the property's when its header or one of its lines names the
+	property. A voucher naming no property at all predates per-property billing
+	and stays with every property of its request.
+	"""
+	header = voucher.utility_property
+	if not frappe.get_meta(doctype).has_field("utility_property"):
+		return voucher.name.isnotnull()
+
+	item_doctype = f"{doctype} Item"
+	if not frappe.get_meta(item_doctype).has_field("utility_property"):
+		return (header == property_name) | header.isnull() | (header == "")
+
+	item = DocType(item_doctype)
+	lines = (
+		frappe.qb.from_(item)
+		.join(voucher)
+		.on(item.parent == voucher.name)
+		.select(item.parent, item.utility_property)
+		.distinct()
+		.where(voucher.utility_service_request.isin(service_request_names))
+		.where(item.utility_property.isnotnull())
+		.where(item.utility_property != "")
+		.run(as_dict=True)
+	)
+	own = list({line.parent for line in lines if line.utility_property == property_name}) or [""]
+	tagged = list({line.parent for line in lines}) or [""]
+
+	untagged = (header.isnull() | (header == "")) & voucher.name.notin(tagged)
+
+	return (header == property_name) | voucher.name.isin(own) | untagged
 
 
 def _get_parents_from_meter_readings(meter_reading_names: list[str], doctype: str) -> list:

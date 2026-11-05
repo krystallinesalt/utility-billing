@@ -254,6 +254,34 @@ def add_comment(doctype: str, name: str, content: str) -> None:
 		frappe.log_error(f"Error adding comment to {doctype} {name}: {frappe.get_traceback()}")
 
 
+def set_property_on_invoice(invoice, row, source_item, company: str) -> str | None:
+	"""Mark an auto-billed invoice as the bill of one leased property.
+
+	A request may lease several properties, each billed on its own invoice, so
+	the property and its cost center come from the Requested Properties row,
+	not from the request header (which is empty when it leases several).
+
+	Args:
+		invoice: The new ``Sales Invoice``.
+		row: The ``Contract Utility Property Item`` row being billed.
+		source_item: The request's item line billed for the row.
+		company: The request's company.
+
+	Returns:
+		The property's cost center, or ``None`` when it has none in ``company``.
+	"""
+	from utility_billing.utility_billing.utils.cost_center import resolve_primary_cost_center
+
+	if invoice.meta.has_field("utility_property"):
+		invoice.utility_property = row.utility_property
+
+	cost_center = resolve_primary_cost_center(row.utility_property, source_item.item_code, company)
+	if cost_center:
+		invoice.cost_center = cost_center
+
+	return cost_center
+
+
 @frappe.whitelist()
 def create_item_price_sales_invoices():
 	billing_date = getdate(today())
@@ -411,6 +439,8 @@ def create_item_price_sales_invoices():
 					):
 						invoice.set(fieldname, request.get(fieldname))
 
+				property_cost_center = set_property_on_invoice(invoice, row, source_item, request.company)
+
 				if not invoice.get("territory"):
 					invoice.territory = frappe.db.get_value("Customer", customer, "territory")
 
@@ -429,7 +459,10 @@ def create_item_price_sales_invoices():
 						"qty": source_item.qty,
 						"uom": source_item.get("uom"),
 						"conversion_factor": (source_item.get("conversion_factor") or 1),
-						"cost_center": (source_item.get("cost_center") or invoice.get("cost_center")),
+						"cost_center": (
+							source_item.get("cost_center") or property_cost_center or invoice.get("cost_center")
+						),
+						"utility_property": row.utility_property,
 						"project": (source_item.get("project") or invoice.get("project")),
 					},
 				)
@@ -461,6 +494,11 @@ def create_item_price_sales_invoices():
 						item.set(field, value)
 
 				item.qty = source_item.qty
+				# The item's defaults must not move the line off its property
+				item.utility_property = row.utility_property
+				item.cost_center = (
+					source_item.get("cost_center") or property_cost_center or item.get("cost_center")
+				)
 
 				invoice.calculate_taxes_and_totals()
 				invoice.posting_date = str(getdate(invoice.posting_date))

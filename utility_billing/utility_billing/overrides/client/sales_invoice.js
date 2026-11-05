@@ -302,10 +302,32 @@ function load_service_request_lines(frm, prefill) {
 	});
 }
 
+// The request lines an invoice should start with. A request leasing several
+// properties bills each on its own invoice: with the invoice's Utility
+// Property set only that property's lines are added, and once the invoice
+// holds some of the request's lines the user's choice is kept.
+function lines_to_prefill(frm, lines) {
+	const property = frm.doc.utility_property;
+	if (property) {
+		return lines.filter((line) => line.utility_property === property);
+	}
+
+	const properties = new Set(lines.map((line) => line.utility_property).filter(Boolean));
+	if (properties.size > 1) {
+		const listed = new Set(lines.map((line) => line.item_code));
+		const has_request_lines = (frm.doc.items || []).some((row) => listed.has(row.item_code));
+		if (has_request_lines) {
+			return [];
+		}
+	}
+
+	return lines;
+}
+
 // Add the request's utility items the invoice does not bill yet.
 async function prefill_service_request_lines(frm, lines) {
 	const billed = new Set((frm.doc.items || []).map((row) => row.item_code));
-	const missing = lines.filter((line) => !billed.has(line.item_code));
+	const missing = lines_to_prefill(frm, lines).filter((line) => !billed.has(line.item_code));
 
 	if (!missing.length) return;
 

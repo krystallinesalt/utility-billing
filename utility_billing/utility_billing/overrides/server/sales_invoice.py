@@ -77,6 +77,7 @@ def validate(doc: Document, method: str | None = None) -> None:
 	governed = govern_utility_lines(doc) if is_item_price_approach() else []
 	# After linking, so a request linked on this save already gives its lines their cost center.
 	fill_request_line_dimensions(doc)
+	align_invoice_property(doc)
 
 	contract = check_service_request_contract(doc)
 	if contract:
@@ -257,9 +258,11 @@ def check_within_contract(contract_name: str, governed: list[frappe._dict]) -> N
 	Deliberately independent of the lease check: the Contract is read on its
 	own, so a request edited after its Contract was made surfaces as a mismatch
 	instead of one source silently winning. A line's coverage is the Contract
-	row of its property, falling back to the Contract's own dates; a secondary
-	line has no property, so it uses the Contract's own dates. Blank dates are
-	open ended.
+	row of its property. A property the Contract does not list is refused when
+	the Contract lists properties: the Contract's own dates span every property
+	of the request, so they say nothing about this one. A secondary line, or
+	any line of a Contract listing no properties, uses the Contract's own
+	dates. Blank dates are open ended.
 
 	The Contract is read fresh on every call. Its rows are locked to what
 	``create_contract`` copied from the request, so they may differ from the
@@ -283,6 +286,14 @@ def check_within_contract(contract_name: str, governed: list[frappe._dict]) -> N
 
 	for line in governed:
 		contract_row = rows_by_property.get(line.utility_property)
+		if line.utility_property and rows_by_property and not contract_row:
+			frappe.throw(
+				_(
+					"Row #{0}: property {1} is not on Contract {2}. Update the Contract from "
+					"its Utility Service Request before billing it."
+				).format(line.row.idx, frappe.bold(line.utility_property), contract.name),
+				title=_("Property not under contract"),
+			)
 		start = (contract_row and contract_row.start_date) or contract.start_date
 		end = (contract_row and contract_row.end_date) or contract.end_date
 		coverage = (
@@ -608,6 +619,44 @@ def fill_request_line_dimensions(doc: Document) -> None:
 
 		if cost_center:
 			line.cost_center = cost_center
+
+
+def align_invoice_property(doc: Document) -> None:
+	"""Keep an invoice of a leased property to that property's lines.
+
+	A request may lease several properties, each billed on its own invoice.
+	When the invoice names its Utility Property, a line billing another
+	property is refused; when it names none and every line with a property
+	bills the same one, the invoice takes it, so the invoice can be found and
+	reported by property. Only for invoices linked to a request under the Item
+	Price approach.
+
+	Raises:
+		frappe.ValidationError: When a line bills a property other than the
+			invoice's.
+	"""
+	if not is_item_price_approach() or not doc.get(REQUEST_FIELD) or doc.get("is_return"):
+		return
+	if not doc.meta.has_field("utility_property"):
+		return
+
+	billed = {line.utility_property for line in doc.get("items") or [] if line.get("utility_property")}
+	invoice_property = doc.get("utility_property")
+
+	if not invoice_property:
+		if len(billed) == 1:
+			doc.utility_property = billed.pop()
+		return
+
+	for line in doc.get("items") or []:
+		if line.get("utility_property") and line.utility_property != invoice_property:
+			frappe.throw(
+				_(
+					"Row {0} bills property {1}, but this invoice is for property {2}. "
+					"Bill each property on its own invoice, or clear the invoice's Utility Property."
+				).format(line.idx, frappe.bold(line.utility_property), frappe.bold(invoice_property)),
+				title=_("Property mismatch"),
+			)
 
 
 def map_sales_order_meter_readings_to_invoice(sales_order_name, target_doc):

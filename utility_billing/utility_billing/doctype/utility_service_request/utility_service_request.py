@@ -9,7 +9,7 @@ from erpnext.controllers.accounts_controller import AccountsController
 from frappe import _
 from frappe.contacts.address_and_contact import load_address_and_contact
 from frappe.model.document import Document
-from frappe.utils import add_days, add_months, get_last_day, getdate, nowdate
+from frappe.utils import add_days, add_months, flt, get_last_day, getdate, nowdate
 
 from utility_billing.utility_billing.utils.contract_sync import (
 	refuse_unconfirmed_contract_change,
@@ -34,15 +34,15 @@ class UtilityServiceRequest(Document):
 		self.validate_items()
 		self.set_customer_if_needed()
 		apply_default_price_list(self)
-		self.validate_contract_dates()
 		self.validate_child_items()
+		self.validate_contract_dates()
 		ensure_service_items_for_properties(self)
 		fill_request_item_cost_centers(self)
 
 	def before_update_after_submit(self):
 		# Re-run validation logic when updating after submission
-		self.validate_contract_dates()
 		self.validate_child_items()
+		self.validate_contract_dates()
 		before = self.get_doc_before_save()
 		# Submitted rows keep their cost center; only rows added after submit are filled.
 		fill_request_item_cost_centers(self, skip_rows={row.name for row in (before.items if before else [])})
@@ -98,6 +98,17 @@ class UtilityServiceRequest(Document):
 				self.set(field, value)
 
 	def validate_contract_dates(self):
+		"""Set the request's lease dates.
+
+		With property rows the request's dates are the envelope of its rows:
+		the earliest row start and the latest row end, or no end when any row
+		is open ended. Each property keeps its own lease, so a customer renting
+		several properties on different terms needs a single request. Without
+		rows the dates are entered on the request as before.
+		"""
+		if self.set_dates_from_properties():
+			return
+
 		if self.start_date and self.end_date and getdate(self.start_date) > getdate(self.end_date):
 			frappe.throw("Contract start date cannot be after the end date.")
 
@@ -117,37 +128,53 @@ class UtilityServiceRequest(Document):
 			if getdate(expected_end) != getdate(self.end_date):
 				self.end_date = expected_end
 
-	def validate_child_items(self):
-		parent_start = getdate(self.start_date) if self.start_date else None
-		parent_end = getdate(self.end_date) if self.end_date else None
+	def set_dates_from_properties(self) -> bool:
+		"""Set the request's dates to the envelope of its property rows.
 
+		Released rows count too, so releasing one property never moves the
+		dates of the Contract the others are leased under.
+
+		Returns:
+			``True`` when the request has dated property rows and its dates
+			were set from them, ``False`` otherwise.
+		"""
+		rows = [row for row in self.get("requested_properties") or [] if row.start_date]
+		if not rows:
+			return False
+
+		self.start_date = min(getdate(row.start_date) for row in rows)
+		ends = [getdate(row.end_date) if row.end_date else None for row in rows]
+		self.end_date = None if None in ends else max(ends)
+		self.contract_length_months = (
+			self.get_month_diff(getdate(self.start_date), getdate(self.end_date)) if self.end_date else 0
+		)
+
+		return True
+
+	def validate_child_items(self):
+		"""Complete each property row's own lease dates.
+
+		A row with both dates gets its length from them; a row with a start and
+		a length gets its end from them; a row with neither end nor length is
+		open ended. Rows are not bound by the request's dates: those are derived
+		from the rows (see ``set_dates_from_properties``).
+		"""
 		for row in self.requested_properties:
 			row_start = getdate(row.start_date) if row.start_date else None
 			row_end = getdate(row.end_date) if row.end_date else None
-			length = row.contract_length_months
 
-			if row_start and parent_start and row_start < parent_start:
+			if row_start and row_end and row_end < row_start:
 				frappe.throw(
-					f"Property start date '{row_start}' in row {row.idx} cannot be before contract start date '{parent_start}'."
-				)
-
-			if row_end and parent_end and row_end > parent_end:
-				frappe.throw(
-					f"Property end date '{row_end}' in row {row.idx} cannot be after contract end date '{parent_end}'."
+					_("Property end date {0} in row {1} cannot be before its start date {2}.").format(
+						row_end, row.idx, row_start
+					)
 				)
 
 			if row_start and row_end:
 				row.contract_length_months = self.get_month_diff(row_start, row_end)
 
-			elif row_start and length is not None:
-				new_end = add_months(row_start, length)
-				if parent_end and new_end > parent_end:
-					row.end_date = parent_end
-				else:
-					row.end_date = new_end
-
-			if length == 0:
-				row.end_date = None
+			elif row_start and flt(row.contract_length_months) > 0:
+				row.end_date = add_months(row_start, row.contract_length_months)
 
 	def get_month_diff(self, start, end):
 		"""Return month difference between two date objects"""
@@ -159,6 +186,25 @@ class UtilityServiceRequest(Document):
 			months -= 1
 
 		return max(months, 0)
+
+
+def single_property(doc) -> str | None:
+	"""Return the one property a request is about, if it is about exactly one.
+
+	The request's own Utility Property wins; otherwise the property of its
+	active Requested Properties when they lease a single one. A request leasing
+	several properties has none, as no single property speaks for it.
+	"""
+	if doc.get("utility_property"):
+		return doc.utility_property
+
+	properties = {
+		row.utility_property
+		for row in doc.get("requested_properties") or []
+		if row.utility_property and row.get("is_active") != 0
+	}
+
+	return properties.pop() if len(properties) == 1 else None
 
 
 def ensure_service_items_for_properties(doc) -> None:
@@ -355,7 +401,7 @@ def create_sales_order(doc, customer_doc):
 	sales_order_doc = frappe.new_doc("Sales Order")
 	sales_order_doc.customer = customer_doc.name
 	sales_order_doc.utility_service_request = doc.name
-	sales_order_doc.utility_property = doc.property
+	sales_order_doc.utility_property = single_property(doc)
 	sales_order_doc.transaction_date = frappe.utils.nowdate()
 	sales_order_doc.delivery_date = add_months(sales_order_doc.transaction_date, 1)
 
@@ -393,7 +439,7 @@ def get_site_survey_defaults(docname):
 		"utility_service_request": docname,
 		"issue_type": doc.request_type,
 		"customer": doc.customer,
-		"utility_property": doc.utility_property,
+		"utility_property": single_property(doc),
 	}
 
 

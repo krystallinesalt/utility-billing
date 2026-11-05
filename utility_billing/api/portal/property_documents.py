@@ -62,10 +62,10 @@ def get_property_documents(property_name: str, customer_names: list[str]) -> dic
 	service_request_names = [request.name for request in service_requests]
 
 	sales_orders = get_sales_orders(
-		customer_names, meter_reading_names, service_request_names
+		customer_names, meter_reading_names, service_request_names, property_name
 	)
 	sales_invoices = get_sales_invoices(
-		customer_names, meter_reading_names, service_request_names
+		customer_names, meter_reading_names, service_request_names, property_name
 	)
 	payment_entries = get_payment_entries(
 		customer_names,

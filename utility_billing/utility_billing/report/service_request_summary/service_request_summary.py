@@ -27,6 +27,13 @@ def get_columns():
             "width": 200
         },
         {
+            "label": _("Property"),
+            "fieldname": "utility_property",
+            "fieldtype": "Link",
+            "options": "Utility Property",
+            "width": 150
+        },
+        {
             "label": _("Date"),
             "fieldname": "date",
             "fieldtype": "Date",
@@ -74,6 +81,12 @@ def get_columns():
             "fieldtype": "Float",
             "width": 150,
             "precision": 2
+        },
+        {
+            "label": _("Remaining Days"),
+            "fieldname": "remaining_days",
+            "fieldtype": "Int",
+            "width": 120
         },
         {
             "label": _("Properties Count"),
@@ -125,24 +138,67 @@ def get_data(filters):
         filters=conditions,
         fields=[
             "name", "date", "customer", "customer_name", "request_type",
-            "status", "request_status", "start_date", "end_date", "contract_length_months",
+            "request_status", "start_date", "end_date", "contract_length_months",
             "company", "territory", "customer_group", "utility_bill_structure",
             "remarks"
         ],
         order_by="date desc, name desc"
     )
 
-    for row in data:
-        row["properties_count"] = frappe.db.count(
-            "Contract Utility Property Item",
-            filters={"parent": row["name"]}
-        )
-        if row.get("start_date") and row.get("end_date"):
-            row["remaining_days"] = date_diff(row["end_date"], today())
-        else:
-            row["remaining_days"] = 0
+    properties = get_property_rows([row["name"] for row in data])
 
-    return data
+    # One row per request with its overall lease, then one indented row per
+    # leased property with that property's own lease.
+    result = []
+    for row in data:
+        rows = properties.get(row["name"], [])
+        row["indent"] = 0
+        row["properties_count"] = len(rows)
+        row["remaining_days"] = remaining_days(row.get("end_date"))
+        result.append(row)
+
+        for prop in rows:
+            result.append(
+                {
+                    "name": row["name"],
+                    "utility_property": prop.utility_property,
+                    "customer": row.get("customer"),
+                    "start_date": prop.start_date,
+                    "end_date": prop.end_date,
+                    "contract_length_months": prop.contract_length_months,
+                    "remaining_days": remaining_days(prop.end_date) if prop.is_active else 0,
+                    "remarks": "" if prop.is_active else _("Released"),
+                    "indent": 1,
+                }
+            )
+
+    return result
+
+
+def get_property_rows(request_names):
+    """Return the Requested Properties rows of each request, in row order."""
+    if not request_names:
+        return {}
+
+    rows = frappe.get_all(
+        "Contract Utility Property Item",
+        filters={
+            "parent": ("in", request_names),
+            "parenttype": "Utility Service Request",
+            "parentfield": "requested_properties",
+        },
+        fields=["parent", "utility_property", "start_date", "end_date", "contract_length_months", "is_active"],
+        order_by="parent, idx",
+    )
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[row.parent].append(row)
+
+    return grouped
+
+
+def remaining_days(end_date):
+    return max(date_diff(end_date, today()), 0) if end_date else 0
 
 
 def get_conditions(filters):
@@ -166,8 +222,6 @@ def get_conditions(filters):
         conditions.append(["territory", "=", filters.get("territory")])
     if filters.get("company"):
         conditions.append(["company", "=", filters.get("company")])
-    if filters.get("status"):
-        conditions.append(["status", "=", filters.get("status")])
     if filters.get("request_status"):
         conditions.append(["request_status", "=", filters.get("request_status")])
     if filters.get("request_type"):
